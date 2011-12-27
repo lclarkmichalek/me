@@ -3,13 +3,13 @@ RELEASE = False
 
 from math import pi, cos, sin, hypot
 from datetime import datetime
-import random, os, sys
+import random, os, sys, json
 
 import pygame
 from pygame import draw, display, image, key, font, transform, mouse
 
 pygame.init()
-mouse.set_visible(False)
+#mouse.set_visible(False)
 key.set_repeat(10, 75)
 
 try:
@@ -23,7 +23,9 @@ if RELEASE:
     modes = display.list_modes()
     VWIDTH, VHEIGHT = modes[0]
 else:
-    VWIDTH, VHEIGHT = 640, 480
+    VWIDTH, VHEIGHT = 1080, 960
+
+FPS = 60
 
 color_schemes = ["blue", "red", "green", "yellow"]
 color_keymap = {
@@ -79,8 +81,17 @@ colors = {
         }
 }
 
-class GameEnded(RuntimeError):
-    pass
+path_counts = {
+    'easy': 100,
+    'medium': 500,
+    'hard': 1000
+}
+
+avatar_speeds = {
+    'easy': 150,
+    'medium': 200,
+    'hard': 300
+}
 
 def randrange(start, end):
     """
@@ -103,39 +114,85 @@ def from_hex(value):
         return tuple(int(value[i:i+lv/3], 16) for i in range(0, lv, lv/3))
     return value
 
+def format_score(score):
+    rvst = str(int(score))[::-1]
+    return ','.join(rvst[i:i+3] for i in\
+                        range(0, len(rvst), 3))[::-1]
+
 def to_cartesian(t, r, o=(0, 0), force_int=False):
     if force_int:
         return int(r * cos(t) + o[0]), int(r * sin(t) + o[1])
     return r * cos(t) + o[0], r * sin(t) + o[1]
 
 class Logic():
-    score = 0
-    bonus = 0
-    bonus_decay = 0.3
-    bonus_increase = 30
-    colors = {
+    bonus_decay = 0.7
+    bonus_increase = 10
+    color_difficulties = {
         'easy': ['blue', 'red'],
         'medium': ['blue', 'red', 'green'],
         'hard': ['blue', 'red', 'green', 'yellow']
         }
-    running = True
+    exit_keys = (pygame.K_ESCAPE,)
+    down_keys = (pygame.K_DOWN,)
+    up_keys = (pygame.K_UP,)
 
     def __init__(self, screen, difficulty):
         self.last_updated = 0
         self.difficulty = difficulty
         self.current_color = "blue"
         self.screen = screen
+        self.running = True
+        self.bonus = 0
+        self.score = 0
 
     def create_spiral_dependants(self):
         self.avatar = Avatar(self, self.screen)
         self.particles = ParticleManager(self, self.screen)
+        self.hud = HUD(self.screen, self)
 
-    def update(self, bonus_path=False):
+    def handle_event(self, event):
+        if event.type == pygame.QUIT:
+            sys.exit()
+        if event.type == pygame.KEYDOWN:
+            if event.key in self.exit_keys:
+                self.running = False
+            elif event.key in self.down_keys:
+                self.avatar.change_dev(-1)
+            elif event.key in self.up_keys:
+                self.avatar.change_dev(1)
+            elif event.key in color_keymap:
+                color = color_keymap[event.key]
+                if color in self.colors:
+                    self.change_color(self.colors.index(color))
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.hud.screen_pressed(event.pos):
+                return
+            self.screen_pressed(event.pos)
+
+    def screen_pressed(self, pos):
+        """
+        Handles the screen being pressed.
+
+        Arguments:
+        - `self`:
+        - `pos`:
+        """
+        s_pos = self.screen.screen_pos
+        s_center = self.screen.spiral.center
+        s_pos = (pos[0] + s_pos[0] - s_center[0],
+                 pos[1] + s_pos[1] - s_center[1])
+        mag = hypot(*s_pos)
+        if abs(mag) > abs(self.screen.spiral.radius(self.avatar.t)):
+            self.avatar.change_dev(1)
+        else:
+            self.avatar.change_dev(-1)
+
+    def update(self):
         now = datetime.utcnow()
         if not self.last_updated:
             self.last_updated = now
         t_delta = (now - self.last_updated).total_seconds() or 0.000001
-        if not bonus_path:
+        if not self.avatar.on_path():
             self.bonus -= self.bonus_decay * self.bonus * t_delta
             if self.bonus < 1:
                 self.bonus = 0
@@ -143,21 +200,42 @@ class Logic():
             self.bonus += self.bonus_increase * t_delta
         self.last_updated = now
 
+        oldt = self.avatar.t
+
         self.avatar.update(t_delta)
+
+        if self.avatar.on_any_path():
+            path = self.avatar.get_on_path()
+            point = path.passed(oldt, self.avatar.t)
+            if point:
+                if not point.unhittable:
+                    point.hit = True
+                if self.correct_point(point):
+                    self.correct_point_hit()
+                elif not self.avatar.bouncing:
+                    self.incorrect_point_hit()
+
         self.particles.update(t_delta)
 
+    def correct_point(self, point):
+        return point.color == self.current_color
+
+    @property
+    def colors(self):
+        return self.color_difficulties[self.difficulty]
+
     def change_color(self, index):
-        self.current_color = self.colors[self.difficulty][index]
+        self.current_color = self.colors[index]
 
     def correct_point_hit(self):
         self.score += self.bonus * 1000
-        self.bonus += 5
+        self.bonus += 10
 
         self.particles.correct_point_hit()
         self.avatar.correct_point_hit()
 
     def incorrect_point_hit(self):
-        self.score -= self.bonus/2 * 1000
+        self.score /= 5
         self.bonus = 0
 
         self.particles.incorrect_point_hit()
@@ -182,9 +260,9 @@ class Spiral():
         self.max = max
         self.colors = colors
         self.paths_by_color = {}
-        for color in self.logic.colors[self.logic.difficulty]:
+        for color in self.logic.colors:
             self.paths_by_color[color] = []
-        self.paths_by_dev = {-3: [], -2: [], -1: [], 0: [], 1: [], 2: []}
+        self.paths_by_dev = {-2: [], -1: [], 0: [], 1: [], 2: []}
 
         self.spirals = {}
 
@@ -217,17 +295,24 @@ class Spiral():
             self.spirals[color]  = surf
 
     def generate_paths(self):
-        count = 100
+        count = path_counts[self.logic.difficulty]
+        paths = []
         for _ in range(count):
-            color = random.choice(self.logic.colors[self.logic.difficulty])
-            dev = random.randrange(-3, 3)
-            s = randrange(self.init + pi, self.max - 2 * pi)
-            l = randrange(pi/8, pi/2)
+            color = random.choice(self.logic.colors)
+            dev = random.randrange(-2, 3)
+            s = randrange(self.init + pi, self.max - pi/8)
+            l = randrange(pi/8, pi/4)
             e = s + l
+            if e > self.max:
+                e = self.max
             path = Path(self, s, e, color, dev)
-            path.generate_points(random.random() * 10)
+            if any(o.intersect(path) for o in paths):
+                continue
+
+            path.generate_points(1 + random.random() * 5)
             self.paths_by_color[color].append(path)
             self.paths_by_dev[dev].append(path)
+            paths.append(path)
 
     def pre_draw_paths(self):
         for paths in self.paths_by_color.values():
@@ -236,14 +321,13 @@ class Spiral():
                     path.draw(bg)
 
     def radius(self, t, dev=0):
-        return t * self.const + dev * pi/4.
+        return self.const * (t + dev * pi/float(4))
 
     def get_background(self, surf):
         pos = self.screen.screen_pos
         color = self.logic.current_color
         surf.blit(self.spirals[color], (0, 0),
                   (pos, (pos[0] + VWIDTH, pos[1] + VHEIGHT)))
-        self.draw_points(surf)
 
     def draw_points(self, surface):
         for paths in self.paths_by_color.values():
@@ -252,12 +336,12 @@ class Spiral():
                     point.draw(surface)
 
 class Avatar():
-    def __init__(self, logic, screen, speed=100, size=15):
+    def __init__(self, logic, screen, size=12):
         self.logic = logic
         self.screen = screen
         self.spiral = screen.spiral
         self.t = screen.spiral.init
-        self.speed = speed
+        self.speed = avatar_speeds[self.logic.difficulty]
         self.size = size
         self.dev = 0
         self.bouncing = False
@@ -269,14 +353,14 @@ class Avatar():
     def draw(self, surface):
         r = self.screen.spiral.radius(self.t, self.dev)
         abs_pos = self.screen.to_cart(self.t, r)
-        s_pos = self.screen.screen_position
+        s_pos = self.screen.screen_pos
         pos = (abs_pos[0] - s_pos[0], abs_pos[1] - s_pos[1])
-        draw.circle(surface, self.screen.gc("avatar"), pos, self.size)
+        draw.circle(surface, self.screen.gc("avatar"), map(int, pos), self.size)
 
     def update(self, t_delta):
         d_delta = self.speed * t_delta
         self.t += d_delta / self.spiral.radius(self.t)
-        if self.t > self.spiral.max:
+        if not (self.spiral.init < self.t < self.spiral.max):
             self.logic.running = False
 
         if self.bouncing:
@@ -307,23 +391,34 @@ class Avatar():
                 return True
         return False
 
+    def on_any_path(self):
+        for path in self.spiral.paths_by_dev[self.dev]:
+            if path.inside(self.t, self.dev):
+                return True
+        return False
+
+    def get_on_path(self):
+        for path in self.spiral.paths_by_dev[self.dev]:
+            if path.inside(self.t, self.dev):
+                return path
+
 class ParticleManager():
     def __init__(self, logic, screen):
         self.screen = screen
         self.logic = logic
 
         self.point_ps = {}
-        for color in logic.colors[logic.difficulty]:
+        for color in logic.colors:
             names = ("p1", "p2", "p3", "p4")
             particle_colors = []
             for name in names:
                 particle_colors.append(self.screen.gc(name, color))
             self.point_ps[color] = padlib.particle_system(
                 (0, 0), particle_colors, [20, 30], 360, 0, 0,
-                20 if android else 30)
+                10 if android else 30)
             self.path_ps = padlib.particle_system(
-                (0, 0), particle_colors, [20, 30], 360, 0, 0,
-                5 if android else 10)
+                (0, 0), particle_colors, [20, 50], 360, 0, 0,
+                2 if android else 10)
 
     def update(self, t_delta):
         pos = self.logic.avatar.cart_viewport(True)
@@ -351,7 +446,7 @@ class ParticleManager():
                 self.path_ps.density = int(self.path_ps.density * 0.9)
 
     def correct_point_hit(self):
-        ps = self.point_ps[self.logic.color]
+        ps = self.point_ps[self.logic.current_color]
         ps.density = 100
         ps.speedrange[1] = 100
 
@@ -361,11 +456,13 @@ class ParticleManager():
         self.path_ps.density = 0
 
     def draw(self, surface):
-        point_ps = self.point_ps[self.logic.color]
+        point_ps = self.point_ps[self.logic.current_color]
         point_ps.draw(surface)
         self.path_ps.draw(surface)
 
 class AssetManager():
+    font_size = 50
+
     def __init__(self):
         names = {'blue': 'a',
                  'red': 's',
@@ -394,7 +491,7 @@ class HUD():
 
     def draw(self, surface):
         assets = self.screen.assets
-        items = self.logic.colors[self.logic.difficulty]
+        items = self.logic.colors
         width_needed = 124 * len(items) + 12 * (len(items)-1)
         x = (VWIDTH - width_needed)/2
         y = 12
@@ -408,24 +505,26 @@ class HUD():
                      .get_height())
                     ))
 
+        score = format_score(self.logic.score)
         score = assets.render_text(
-            "Score: " + str(int(self.points)),
+            "Score: " + score,
             self.screen.gc("avatar"))
         y = VHEIGHT - 20 - score.get_height() * 2
         x = (VWIDTH - score.get_width())/2
         surface.blit(score, (x, y))
 
-        bonus = assets(
-            "Bonus: " + str(int(self.bonus)),
-            gc("avatar"))
+        bonus = assets.render_text(
+            "Bonus: " + str(int(self.logic.bonus)),
+            self.screen.gc("avatar"))
         y = VHEIGHT - 10 - bonus.get_height()
         x = (VWIDTH - bonus.get_width())/2
         surface.blit(bonus, (x, y))
 
     def screen_pressed(self, pos):
-        for i, bound in self.bounds:
+        for i, bound in enumerate(self.bounds):
             if bound.collidepoint(pos):
                 self.logic.change_color(i)
+                return True
 
 class Screen():
     width, height = 5000, 5000
@@ -438,49 +537,26 @@ class Screen():
         self.clock = clock
         self.logic = Logic(self, difficulty)
         self.spiral = Spiral(self.width, self.height,
-                             self.logic.colors[self.logic.difficulty],
+                             self.logic.colors,
                              self, self.logic)
         self.logic.create_spiral_dependants()
         self.last = datetime.utcnow()
+        self.assets = AssetManager()
 
     def show(self):
-
+        self.spiral.prepare()
         self.start_music()
-        self.logic.change_color("blue")
+        self.logic.change_color(0)
 
         while self.logic.running:
             for event in pygame.event.get():
                 self.logic.handle_event(event)
-                if android:
-                    if event.type == pygame.MOUSEBUTTONDOWN and\
-                            event.button == 1:
-                        self.logic.screen_pressed(event.pos)
             self.update()
 
-            self.flip()
-            self.clock.tick(60)
+            self.draw_all()
+            display.flip()
+            self.clock.tick(FPS)
 
-            if android:
-                if android.check_pause():
-                    android.wait_for_resume()
-
-        while self.logic.running:
-            self.draw_spiral()
-            self.draw_score()
-            self.flip()
-            self.clock.tick(60)
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    sys.exit()
-                if event.type == pygame.KEYDOWN:
-                    if event.key in (pygame.K_RETURN,
-                                     pygame.K_ESCAPE):
-                        self.stop()
-                        return
-                if event.type == pygame.MOUSEBUTTON_DOWN and android:
-                    self.stop()
-                    return
             if android:
                 if android.check_pause():
                     android.wait_for_resume()
@@ -494,11 +570,20 @@ class Screen():
         - `surface`:
         """
         self.spiral.get_background(surface)
+        self.spiral.draw_points(surface)
+        self.logic.particles.draw(surface)
+        self.logic.avatar.draw(surface)
+        self.logic.hud.draw(surface)
 
-    def flip(self):
+    def draw_all(self):
+        """
+        Draws the whole game.
+
+        Arguments:
+        - `self`:
+        """
         disp = display.get_surface()
-        disp.blit(self.disp, (0, 0))
-        display.flip()
+        self.draw(disp)
 
     def to_cart(self, t, r=None, force_int=False):
         r = r or self.spiral.radius(t)
@@ -510,20 +595,6 @@ class Screen():
     def adjust_to_viewport(self, (x, y)):
         return (x - self.screen_pos[0], y - self.screen_pos[1])
 
-    def load_assets(self):
-        names = {'blue': 'a',
-                 'red': 's',
-                 'green': 'd',
-                 'yellow': 'f'}
-        self.assets = {}
-        for color, key in names.items():
-            surf = image.load(os.path.join("data", key + ".png")).convert()
-            surf.set_colorkey((0, 0, 0))
-            self.assets[color] = surf
-
-        self.font = font.Font(os.path.join("data", "DIMIS___.TTF"),
-                              self.font_size)
-
     def play_sound(self, name):
         if android:
             import android_mixer as mixer
@@ -533,94 +604,6 @@ class Screen():
         sound = mixer.Sound(os.path.join("data", "{0}.ogg".format(name)))
         sound.play()
 
-    def screen_pressed(self, position):
-        for i, bound in enumerate(self.button_bounds):
-            if bound.collidepoint(position):
-                color = path_colors[self.difficulty][i]
-                self.change_color(color)
-                return
-
-        s_pos = (position[0] + self.screen_pos[0] - self.spiral_center[0],
-                 position[1] + self.screen_pos[1] - self.spiral_center[1])
-        print s_pos
-        mag = hypot(*s_pos)
-        print mag
-        print self.radius(self.avatar_t)
-        if abs(mag) > abs(self.radius(self.avatar_t)):
-            self.change_avatar_dev(1)
-        else:
-            self.change_avatar_dev(-1)
-
-    def draw_hud(self):
-        items = path_colors[self.difficulty]
-        viewport = self.disp
-        width_needed = 124 * len(items) + 12 * (len(items)-1)
-        assert width_needed < VWIDTH, "Not enough room to draw hud"
-        x = (VWIDTH - width_needed)/2
-        y = 12
-        self.button_bounds = []
-        for i, l in enumerate(items):
-            viewport.blit(self.assets[l], (x + i * (124 + 12), y))
-            self.button_bounds.append(pygame.Rect(
-                    (x + i * (124 + 12), y),
-                    (self.assets[l].get_width(), self.assets[l].get_height())
-                    ))
-
-        score = self.font.render("Score: " + str(int(self.points)),
-                                 True, gc("avatar"))
-        y = VHEIGHT - 20 - score.get_height() * 2
-        x = (VWIDTH - score.get_width())/2
-        viewport.blit(score, (x, y))
-
-        bonus = self.font.render("Bonus: " + str(int(self.bonus)),
-                                 True, gc("avatar"))
-        y = VHEIGHT - 10 - bonus.get_height()
-        x = (VWIDTH - bonus.get_width())/2
-        viewport.blit(bonus, (x, y))
-
-    def draw_score(self):
-        viewport = self.disp
-        if self.menu_state == "ok":
-            self.menu_state = "dim_out_1"
-        if self.menu_state == "dim_out_1":
-            if not self.dimmer:
-                self.dimmer = pygame.Surface(display.get_surface().get_size())
-                self.dimmer.fill((0, 0, 0))
-            self.dimmer.set_alpha(self.dim)
-            self.dim += 1
-            viewport.blit(self.dimmer, (0, 0))
-            if self.dim == 200:
-                self.menu_state = "dim_in_zoom"
-                self.dimmer = None
-        if self.menu_state == "dim_in_zoom":
-            self.zoom_size[0] += 20
-            self.zoom_size[1] += 20
-            self.draw_paths()
-            self.draw_hot_paths()
-            try:
-                scaled = transform.scale(self.screen, self.zoom_size)
-            except ValueError:
-                self.menu_state = "wait"
-            viewport.blit(scaled,
-                          ((-scaled.get_width() + VWIDTH)/2,
-                           (-scaled.get_height() + VHEIGHT)/2))
-            raw = "Score: {0}".format(int(self.points))
-            surf = self.font.render(raw, True, gc("avatar"))
-            y = (VHEIGHT - surf.get_height())/2
-            x = (VWIDTH - surf.get_width())/2
-            viewport.blit(surf, (x, y))
-
-            if not self.dimmer:
-                self.dimmer = pygame.Surface(display.get_surface().get_size())
-                self.dimmer.fill((0, 0, 0))
-            self.dimmer.set_alpha(self.dim)
-            self.dim -= 4
-            viewport.blit(self.dimmer, (0, 0))
-            if self.dim == 0:
-                self.menu_state = "wait"
-        if self.menu_state == "wait":
-            return
-
     @property
     def screen_pos(self):
         screen_pos = list(self.to_cart(self.logic.avatar.t))
@@ -629,78 +612,8 @@ class Screen():
         return tuple(screen_pos)
 
     def update(self):
-        time_delta = (datetime.utcnow() - self.last).total_seconds()
-        self.logic.update(time_delta)
+        self.logic.update()
         self.last = datetime.utcnow()
-
-    def generate_paths(self):
-        self.paths = {}
-        for color in path_colors[self.difficulty]:
-            self.paths[color] = self.generate_path(color)
-
-    def draw_paths(self):
-        for color, path in self.paths.iteritems():
-            self.draw_path(color, path)
-
-    def generate_path(self, color):
-        rpoints = []
-        for _ in range(n_paths[self.difficulty]):
-            start = random.randrange((self.avatar_init + 2) * 1000,
-                                 (self.spiral_max - 1) * 1000) / 1000.
-            end = start + random.random()
-            level = random.randrange(-2, 3)
-            for s, e, l in self.ranges:
-                if level == l and (s < start < e or s < end < e):
-                    break
-            else:
-                self.ranges.append((start, end, level))
-                distance = (end - start) / random.randrange(1, 5)
-                i = 0
-                while start + i * distance < end:
-                    rpoints.append((level, start + i * distance))
-                    i += 1
-
-        polar_points = []
-        for d, t in rpoints:
-            polar_points.append(Point(t, self.radius(t + d * pi/4), color))
-        return polar_points
-
-    def draw_path(self, color, path):
-        disp = self.disp
-        for p in path:
-            if self.logic.current_color == color:
-                draw_color = gc("avatar")
-            else:
-                draw_color = from_hex(colors[color]["pale"])
-            x, y = p.cart(self)
-            x -= self.screen_pos[0]
-            y -= self.screen_pos[1]
-            if 0 < x < VWIDTH and 0 < y < VHEIGHT:
-                draw.circle(disp, draw_color, (int(x), int(y)),
-                            self.avatar_size - 2,
-                            0 if not p.hit else 1)
-
-    def generate_hot_paths(self):
-        for _ in range(100):
-            start = random.randrange((self.avatar_init + 2) * 1000,
-                                     (self.spiral_max - 2) * 1000) / 1000.
-            size =  1 + random.random()
-            end = start + size
-            color = random.choice(path_colors[self.difficulty])
-            dev = random.randrange(-2, 3)
-            hot = Hot(start, end, color, dev)
-            for h in self.hots:
-                if h.intersect(hot):
-                    break
-            else:
-                self.hots.append(hot)
-
-    def draw_hot_paths(self):
-        for hot in self.hots:
-            for bg in self.backgrounds:
-                draw.lines(bg,
-                           from_hex(colors[hot.color]["pale"]),
-                           False, hot.get_points(self), 3)
 
     def start_music(self):
         self.play_sound("Intermission")
@@ -712,82 +625,239 @@ class Screen():
             import android_mixer as mixer
         mixer.fadeout(1000)
 
-class Menu(Screen):
+class MenuLogic(Logic):
     selected = 0
     entries = ("Easy", "Medium", "Hard", "Exit")
 
-    @staticmethod
-    def show(clock):
-        s = Menu(clock, "hard")
-        disp = display.get_surface()
-        s.spiral.prepare()
-        while 1:
-            if android:
-                if android.check_pause():
-                    android.wait_for_resume()
+    def create_spiral_dependants(self):
+        Logic.create_spiral_dependants(self)
+        self.hud = MenuHUD(self.screen, self)
 
-            s.logic.avatar.speed = 500
-            s.update()
-            s.draw(disp)
-            display.flip()
+    def correct_point_hit(self):
+        return
+    def incorrect_point_hit(self):
+        return
 
-            clock.tick(60)
-            print clock.get_fps()
+    def handle_event(self, event):
+        if event.type == pygame.QUIT:
+            self.selected = self.entries.index("Exit")
+            self.running = False
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_DOWN:
+                self.selected += 1
+            elif event.key == pygame.K_UP:
+                self.selected -= 1
+            elif event.key == pygame.K_RETURN:
+                self.running = False
+            elif event.key == pygame.K_ESCAPE:
+                self.selected = self.entries.index("Exit")
+                self.running = False
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            self.hud.screen_pressed(event.pos)
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    return None
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_DOWN:
-                        s.selected += 1
-                    elif event.key == pygame.K_UP:
-                        s.selected -= 1
-                    elif event.key == pygame.K_RETURN:
-                        return s.entries[s.selected].lower()
-                    elif event.key == pygame.K_ESCAPE:
-                        return "Exit"
-                    else:
-                        global current_color
-                        current_color = random.choice(color_schemes)
-                        s.change_color(current_color)
-                if android or not RELEASE:
-                    if event.type == pygame.MOUSEBUTTONDOWN:
-                        if event.button == 1:
-                            out = s.button_pressed(event.pos)
-                            if out != -1:
-                                return s.entries[out]
-                            else:
-                                global current_color
-                                current_color = random.choice(color_schemes)
-                                s.change_color(current_color)
+    def update(self):
+        Logic.update(self)
+        if not self.running and (self.avatar.t > self.screen.spiral.max or\
+                                 self.avatar.t < self.screen.spiral.init + 1):
+            self.running = True
+            self.avatar.speed *= -1
 
-        s.stop()
+class MenuScreen(Screen):
+    def __init__(self, clock):
+        self.clock = clock
+        self.logic = MenuLogic(self, "hard")
+        self.spiral = Spiral(self.width, self.height,
+                             self.logic.colors,
+                             self, self.logic)
+        self.logic.create_spiral_dependants()
+        self.last = datetime.utcnow()
+        self.assets = AssetManager()
 
-    def button_pressed(self, position):
-        for i, bound in enumerate(self.bounds):
-            if bound.collidepoint(position):
-                return i
-        else:
-            return -1
+    def show(self):
+        Screen.show(self)
+        return self.logic.entries[self.logic.selected].lower()
 
-    def draw_hud(self):
-        viewport = self.disp
+    def draw(self, surface):
+        self.spiral.get_background(surface)
+        self.logic.hud.draw(surface)
 
+class MenuHUD(HUD):
+    def draw(self, surface):
         self.bounds = []
-        for i, entry in enumerate(self.entries):
-            if i == self.selected % len(self.entries) and not android:
+        for i, entry in enumerate(self.logic.entries):
+            if i == self.logic.selected % len(self.logic.entries)\
+                    and not android:
                 color = "spiral_color"
             else:
                 color = "avatar"
-            text = self.font.render(entry, True, gc(color))
-            y_offset = (VHEIGHT - text.get_height() * len(self.entries) +\
-                            20 * len(self.entries))/2
+            text = self.screen.assets.render_text(entry, self.screen.gc(color))
+            y_offset = (VHEIGHT - text.get_height() * len(self.logic.entries) +\
+                            20 * len(self.logic.entries))/2
             x = (VWIDTH - text.get_width())/2
             y = text.get_height() * i + 20 * i + y_offset
-            viewport.blit(text, (x, y))
+            surface.blit(text, (x, y))
             self.bounds.append(pygame.Rect(
                     (x, y),
                     (text.get_width(), text.get_height())))
+
+    def screen_pressed(self, position):
+        for i, bound in enumerate(self.bounds):
+            if bound.collidepoint(position):
+                self.logic.running = False
+                self.logic.selected = i
+                return True
+
+class HighScoreManager():
+    def __init__(self):
+        if android:
+            filename = "/sdcard/Me/highscores.json"
+        elif sys.platform == "win32":
+            return
+        else:
+            filename = os.environ["XDG_CONFIG_HOME"] + "/me_highscores.json"
+        self.filename = filename
+
+        try:
+            os.makedirs(os.path.dirname(filename))
+        except OSError:
+            pass
+
+        try:
+            with open(filename, 'r') as score_file:
+                self.scores = json.loads(score_file.read())
+                self.scores.sort(reverse=True)
+        except (ValueError, IOError):
+            print "Creating new highscores file"
+            with open(filename, "w") as empty:
+                empty.write(json.dumps([0, 0, 0, 0, 0,]))
+            self.scores = [0, 0, 0, 0, 0,]
+
+    def score_position(self, score):
+        if score < self.scores[-1]:
+            return -1
+        for i, high in enumerate(self.scores):
+            if score > high:
+                return i - 1
+        return len(self.scores) - 1
+
+    def add_score(self, score):
+        if score in self.scores:
+            return
+        self.scores.append(score)
+        self.scores.sort(reverse=True)
+        self.scores = self.scores[:5]
+        self.write_scores()
+
+    def write_scores(self):
+        with open(self.filename, "w") as score_file:
+            score_file.write(json.dumps(self.scores))
+
+class ScoreScreen():
+    def __init__(self, clock, screen, score, color):
+        self.clock = clock
+        self.color = color
+        self.screen = screen
+        self.zoom_size = list(self.screen.get_size())
+        self.points = score
+        self.dim = 0
+        self.menu_state = "ok"
+        self.dimmer = None
+        self.assets = AssetManager()
+        self.running = True
+        self.show_highscore = False
+        self.highscore_bound = None
+        self.scores = HighScoreManager()
+
+    def draw(self):
+        viewport = display.get_surface()
+        if self.menu_state == "ok":
+            self.menu_state = "dim_out_1"
+        if self.menu_state == "dim_out_1":
+            if not self.dimmer:
+                self.dimmer = pygame.Surface(display.get_surface().get_size())
+                self.dimmer.fill((0, 0, 0))
+            self.dimmer.set_alpha(self.dim)
+            self.dim += 1
+            viewport.blit(self.dimmer, (0, 0))
+            if self.dim > 30:
+                self.menu_state = "dim_in_zoom"
+                self.dimmer = None
+        if self.menu_state in ("dim_in_zoom", "wait"):
+            if not self.dimmer:
+                self.dimmer = pygame.Surface(display.get_surface().get_size())
+            scaled = transform.scale(self.screen, self.zoom_size)
+            viewport.blit(scaled,
+                          ((-scaled.get_width() + VWIDTH)/2,
+                           (-scaled.get_height() + VHEIGHT)/2))
+
+            self.draw_score(viewport)
+            self.draw_highscores(viewport)
+            self.scores.add_score(self.points)
+
+            if self.menu_state == "dim_in_zoom":
+                self.dimmer.set_alpha(self.dim)
+                self.dim -= 1
+                self.zoom_size[0] -= 10
+                self.zoom_size[1] -= 10
+
+            viewport.blit(self.dimmer, (0, 0))
+            if self.dim < 4:
+                self.menu_state = "wait"
+
+    def draw_score(self, viewport):
+        score = format_score(self.points)
+        raw = "Score: {0}".format(score)
+        surf = self.assets.render_text(raw, from_hex(
+                colors[self.color]["avatar"]))
+        y = 350
+        x = (VWIDTH - surf.get_width())/2
+        viewport.blit(surf, (x, y))
+
+    def draw_highscores(self, viewport):
+        highscore = self.scores.score_position(self.points)
+        if highscore != -1:
+            raw = "New Highscore!"
+            surf = self.assets.render_text(raw, from_hex(
+                    colors[self.color]["avatar"]))
+            y = 420
+            x = (VWIDTH - surf.get_width())/2
+            viewport.blit(surf, (x, y))
+            self.highscore_bound = pygame.Rect(
+                (x, y), surf.get_size())
+        if self.show_highscore:
+            for i, high in enumerate(self.scores.scores):
+                if high == 0:
+                    continue
+                if highscore == i:
+                    color = colors["yellow"]["border_color"]
+                else:
+                    color = colors[self.color]["avatar"]
+                raw = str(i + 1) + ": " + format_score(high)
+                surf = self.assets.render_text(raw, from_hex(
+                        color))
+                y = 490 + 70 * i
+                x = (VWIDTH - surf.get_width())/2
+                viewport.blit(surf, (x, y))
+
+    def handle_event(self, event):
+        if event.type == pygame.QUIT:
+            sys.exit()
+        if self.highscore_bound and event.type == pygame.MOUSEBUTTONDOWN:
+            if self.highscore_bound.collidepoint(event.pos):
+                self.show_highscore = not self.show_highscore
+        elif event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+            self.running = False
+
+    def show(self):
+        while self.running:
+            self.draw()
+            display.flip()
+            self.clock.tick(FPS)
+            for event in pygame.event.get():
+                self.handle_event(event)
+            if android:
+                if android.check_pause():
+                    android.wait_for_resume()
 
 class Path():
     def __init__(self, spiral,
@@ -803,10 +873,11 @@ class Path():
         length = self.end - self.start
         s_offset = random.random() * length / 3.
         e_offset = random.random() * length / 3.
-        t = s_offset
+        t = self.start + s_offset
         d = ((self.end - e_offset) - (self.start - s_offset))/float(count)
-        while len(self.points) < count:
-            self.points.append(Point(t, self))
+        while t < self.end:
+            unhittable = int(random.random() * 100) == 0
+            self.points.append(Point(t, self, unhittable))
             t += d
 
     def intersect(self, path):
@@ -823,6 +894,11 @@ class Path():
             return True
         return False
 
+    def passed(self, start, end):
+        for point in self.points:
+            if start < point.t < end and not point.hit:
+                return point
+
     def inside(self, t, dev):
         if dev != self.dev:
             return False
@@ -838,16 +914,19 @@ class Path():
             pos = self.spiral.screen.to_cart(t, r)
             points.append(pos)
 
-        draw.lines(surface, self.spiral.screen.gc("avatar"),
+        draw.lines(surface, self.spiral.screen.gc("avatar", self.color),
                    False, points, 3)
 
 class Point():
-    def __init__(self, t, path):
+    def __init__(self, t, path, unhittable=False):
         self.t = t
         self.path = path
         self.spiral = path.spiral
         self.dev = path.dev
-        self.r = self.spiral.radius(self.t, path.dev)
+        self.r = self.spiral.radius(self.t, self.dev)
+        self.color = path.color if not unhittable else "grey"
+        self.hit = False
+        self.unhittable = unhittable
 
     def passed(self, t1, t2, r):
         if self.hit:
@@ -874,8 +953,11 @@ class Point():
         if not self.screen.collidepoint(pos):
             return
         pos = map(int, pos)
-        color = self.spiral.screen.gc("avatar", self.path.color)
-        draw.circle(surface, color, pos, 10)
+        if self.unhittable:
+            color = (100, 100, 100)
+        else:
+            color = self.spiral.screen.gc("avatar", self.color)
+        draw.circle(surface, color, pos, 10, 1 if self.hit else 0)
 
 def main():
     flags = 0
@@ -889,7 +971,7 @@ def main():
         android.map_key(android.KEYCODE_BACK, pygame.K_ESCAPE)
     while 1:
         clock = pygame.time.Clock()
-        choice = Menu.show(clock).lower()
+        choice = MenuScreen(clock).show()
         if choice == "exit":
             return 0
         else:
@@ -899,6 +981,10 @@ def main():
 def play_game(clock, difficulty):
     s = Screen(clock, difficulty)
     s.show()
+    color = s.logic.current_color
+    screen = s.spiral.spirals[color]
+    ss = ScoreScreen(clock, screen, s.logic.score or 0, color)
+    ss.show()
 
 if __name__ == "__main__":
     main()
