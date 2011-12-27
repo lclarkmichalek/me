@@ -675,7 +675,8 @@ class MenuScreen(Screen):
 
     def show(self):
         Screen.show(self)
-        return self.logic.entries[self.logic.selected].lower()
+        index = self.logic.selected % len(self.logic.entries)
+        return self.logic.entries[index].lower()
 
     def draw(self, surface):
         self.spiral.get_background(surface)
