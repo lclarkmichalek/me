@@ -17,7 +17,7 @@ try:
 except ImportError:
     android = None
 
-import padlib
+import particles
 
 if RELEASE:
     modes = display.list_modes()
@@ -26,8 +26,10 @@ else:
     VWIDTH, VHEIGHT = 1080, 960
 
 FPS = 60
+TURNS = 10
 
 color_schemes = ["blue", "red", "green", "yellow"]
+COLOR_SPARKS = map(pygame.Color, ["#E6E6AC", "#777278", "#A9A990"])
 color_keymap = {
     pygame.K_a: "blue",
     pygame.K_s: "red",
@@ -95,7 +97,7 @@ avatar_speeds = {
 
 def randrange(start, end):
     """
-Return a random variable between start and end. May be a float
+    Return a random variable between start and end. Will be a float
 
     Arguments:
     - `start`:
@@ -171,7 +173,8 @@ class Logic():
 
     def screen_pressed(self, pos):
         """
-        Handles the screen being pressed.
+        Handles the screen being pressed. If the press is further away from the
+        center of the spiral then change_dev(+1) else -1.
 
         Arguments:
         - `self`:
@@ -188,6 +191,11 @@ class Logic():
             self.avatar.change_dev(-1)
 
     def update(self):
+        """
+        Updates the various objects. Namely:
+         - Bonus decay
+
+        """
         now = datetime.utcnow()
         if not self.last_updated:
             self.last_updated = now
@@ -248,7 +256,7 @@ class Spiral():
     def __init__(self, width, height, colors,
                  screen, logic,
                  sample_interval=10, const=30,
-                 init=1.0, max=2*pi*5):
+                 init=1.0, max=2*pi*TURNS):
         self.screen = screen
         self.logic = logic
 
@@ -346,6 +354,13 @@ class Avatar():
         self.dev = 0
         self.bouncing = False
 
+    @property
+    def polar(self):
+        """
+        The polar coords of the avatar. (r, theta)
+        """
+        return self.screen.spiral.radius(self.t, self.dev), self.t
+
     def change_dev(self, change):
         if -3 < self.dev + change < 3:
             self.dev += change
@@ -413,47 +428,34 @@ class ParticleManager():
             particle_colors = []
             for name in names:
                 particle_colors.append(self.screen.gc(name, color))
-            self.point_ps[color] = padlib.particle_system(
-                (0, 0), particle_colors, [20, 30], 360, 0, 0,
-                10 if android else 30)
-            self.path_ps = padlib.particle_system(
-                (0, 0), particle_colors, [20, 50], 360, 0, 0,
-                2 if android else 10)
+            self.point_ps[color] = particles.CircleExplosion(
+                (0, 0), particle_colors, [0, 100], 20)
+            self.path_ps = particles.SparkSystem(
+                (0, 0), COLOR_SPARKS, [2, 10], 30, 0, 0,
+                20)
 
     def update(self, t_delta):
         pos = self.logic.avatar.cart_viewport(True)
         for ps in self.point_ps.values():
-            ps.change_position(pos)
+            ps.pos = pos
             ps.update()
 
-            if ps.density <= 5:
-                ps.density = 0
-            else:
-                ps.density = int(ps.density * (0.5 if android else 0.9))
-            if ps.speedrange[1] < 30:
-                ps.speedrange[1] = 30
-            else:
-                ps.speedrange[1] = int(ps.speedrange[1] * 0.8)
-
-        self.path_ps.change_position(pos)
+        self.path_ps.pos = pos
+        # Make sure the angle is always behind the avatar
+        angle = self.logic.avatar.t * 360/(2*pi) - 90
+        self.path_ps.direction = angle
         self.path_ps.update()
-        if self.logic.avatar.on_path():
+        if self.logic.avatar.on_path() and not self.logic.avatar.bouncing:
             self.path_ps.density = 20
         else:
-            if self.path_ps.density < 2:
-                self.path_ps.density = 0
-            else:
-                self.path_ps.density = int(self.path_ps.density * 0.9)
+            self.path_ps.density = 0
 
     def correct_point_hit(self):
         ps = self.point_ps[self.logic.current_color]
-        ps.density = 100
-        ps.speedrange[1] = 100
+        ps.explode()
 
     def incorrect_point_hit(self):
-        for ps in self.point_ps.values():
-            ps.density = 0
-        self.path_ps.density = 0
+        pass
 
     def draw(self, surface):
         point_ps = self.point_ps[self.logic.current_color]
